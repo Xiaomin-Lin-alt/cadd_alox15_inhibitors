@@ -1,0 +1,282 @@
+import pandas as pd
+import numpy as np
+from imblearn.ensemble import EasyEnsembleClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+
+# 读取文件
+df_train = pd.read_csv('9descriptors.csv')
+df_predict = pd.read_csv('9descriptors_with_names.csv')
+
+print(f"训练数据形状: {df_train.shape}")
+print(f"预测数据形状: {df_predict.shape}")
+
+# 先查看列名
+print(f"训练数据列名: {df_train.columns.tolist()}")
+print(f"预测数据列名: {df_predict.columns.tolist()}")
+
+# 数据预处理
+# 训练数据：前9列为描述符，最后一列为标签
+X_train = df_train.iloc[:, :9]  # 前9列为描述符
+y_train = df_train.iloc[:, -1]   # 最后一列为标签
+
+# 预测数据：需要确保选择的是数值列
+# 先检查哪些列是数值类型
+print(f"\n预测数据各列数据类型:")
+for col in df_predict.columns:
+    print(f"{col}: {df_predict[col].dtype}")
+
+# 选择数值列作为特征
+numeric_columns = []
+for col in df_predict.columns:
+    if df_predict[col].dtype in ['int64', 'float64']:
+        numeric_columns.append(col)
+
+print(f"数值列: {numeric_columns}")
+
+# 使用数值列作为特征
+X_predict = df_predict[numeric_columns]
+
+# 分子名称列 - 选择非数值列
+non_numeric_columns = [col for col in df_predict.columns if col not in numeric_columns]
+if non_numeric_columns:
+    molecule_names = df_predict[non_numeric_columns[0]]  # 使用第一个非数值列作为分子名称
+    print(f"使用 '{non_numeric_columns[0]}' 作为分子名称列")
+else:
+    molecule_names = pd.Series([f"Mol_{i+1}" for i in range(len(df_predict))])
+    print("未找到分子名称列，使用自动生成名称")
+
+print(f"训练特征维度: {X_train.shape}")
+print(f"预测特征维度: {X_predict.shape}")
+print(f"训练标签分布:\n{y_train.value_counts()}")
+
+# 确保特征数量匹配
+if X_train.shape[1] != X_predict.shape[1]:
+    print(f"警告: 训练数据有 {X_train.shape[1]} 个特征，预测数据有 {X_predict.shape[1]} 个特征")
+    # 如果特征数量不匹配，使用前n个共同特征
+    common_features = min(X_train.shape[1], X_predict.shape[1])
+    X_train = X_train.iloc[:, :common_features]
+    X_predict = X_predict.iloc[:, :common_features]
+    print(f"使用前 {common_features} 个共同特征")
+
+# 划分训练测试集
+X_train_split, X_test_split, y_train_split, y_test_split = train_test_split(
+    X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
+)
+
+# 标准化
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train_split)
+X_test_scaled = scaler.transform(X_test_split)
+X_predict_scaled = scaler.transform(X_predict)
+
+# EasyEnsemble模型
+ee_model = EasyEnsembleClassifier(
+    n_estimators=10,
+    estimator=RandomForestClassifier(n_estimators=100, random_state=42),
+    random_state=42
+)
+
+# 训练和评估
+ee_model.fit(X_train_scaled, y_train_split)
+y_pred = ee_model.predict(X_test_scaled)
+y_proba = ee_model.predict_proba(X_test_scaled)[:, 1]
+
+# 性能指标
+accuracy = accuracy_score(y_test_split, y_pred)
+auc = roc_auc_score(y_test_split, y_proba)
+precision = precision_score(y_test_split, y_pred, zero_division=0)
+recall = recall_score(y_test_split, y_pred, zero_division=0)
+f1 = f1_score(y_test_split, y_pred, zero_division=0)
+
+print(f"\n模型性能:")
+print(f"准确率: {accuracy:.4f}")
+print(f"AUC: {auc:.4f}")
+print(f"精确率: {precision:.4f}")
+print(f"召回率: {recall:.4f}")
+print(f"F1分数: {f1:.4f}")
+
+# 预测
+predictions = ee_model.predict(X_predict_scaled)
+probabilities = ee_model.predict_proba(X_predict_scaled)[:, 1]
+
+# 筛选结果
+results_df = pd.DataFrame({
+    'Molecule_Name': molecule_names,
+    'Prediction': predictions,
+    'Probability': probabilities
+})
+
+results_df.to_csv('9easyensemble_predictions.csv', index=False)
+print(f"\n预测完成! 共预测 {len(predictions)} 个分子")
+print("结果已保存到: 9easyensemble_predictions.csv")
+
+# ================= SHAP 分析 - 修正版 =================
+try:
+    import shap
+    import matplotlib.pyplot as plt
+    import warnings
+    warnings.filterwarnings('ignore')
+    
+    print("\n" + "="*50)
+    print("Starting SHAP Analysis...")
+    print("="*50)
+    
+    # 方法1：直接使用整个EasyEnsemble模型进行SHAP分析
+    print("Method 1: Using KernelExplainer for EasyEnsemble model...")
+    
+    # 准备数据
+    X_train_full_df = pd.DataFrame(X_train_scaled, columns=X_train.columns)
+    sample_size = min(100, len(X_train_full_df))
+    X_train_sample = X_train_full_df.sample(sample_size, random_state=42)
+    
+    print(f"Using {sample_size} samples for SHAP analysis...")
+    
+    # 定义预测函数
+    def model_predict(data):
+        return ee_model.predict_proba(data)[:, 1]  # 返回正类的概率
+    
+    # 使用KernelExplainer
+    print("Creating KernelExplainer...")
+    explainer = shap.KernelExplainer(model_predict, X_train_sample)
+    
+    print("Calculating SHAP values, this may take a few minutes...")
+    shap_values = explainer.shap_values(X_train_sample, nsamples=500)
+    
+    print("Plotting SHAP summary plot...")
+    # 调整图形尺寸为更窄的格式
+    plt.figure(figsize=(8, 6))
+    
+    # 创建SHAP摘要图
+    shap.summary_plot(shap_values, 
+                     X_train_sample,
+                     feature_names=X_train.columns.tolist(),
+                     show=False,
+                     plot_size=None)
+    
+    # 调整X轴范围到-0.5到0.5，模仿示例图的窄宽度
+    current_axis = plt.gca()
+    x_min = -0.5
+    x_max = 0.5
+    current_axis.set_xlim(x_min, x_max)
+    
+    # 设置X轴刻度
+    current_axis.set_xticks([-0.5, -0.25, 0.0, 0.25, 0.5])
+    
+    # 只保留X轴标签
+    plt.xlabel("SHAP value (impact on model output)", fontsize=11)
+    plt.tight_layout()
+    
+    # 保存高分辨率图片
+    plt.savefig('SHAP_Summary.png', dpi=300, bbox_inches='tight', facecolor='white')
+    plt.savefig('SHAP_Summary.pdf', bbox_inches='tight', facecolor='white')
+    plt.show()
+    
+    print("✓ SHAP analysis completed!")
+    print("✓ Plot saved as 'SHAP_Summary.png' and 'SHAP_Summary.pdf'")
+    
+    # 输出特征重要性排序
+    print("\n" + "="*50)
+    print("Feature Importance Ranking (based on mean |SHAP| value):")
+    print("="*50)
+    
+    # 计算特征重要性
+    feature_importance = np.abs(shap_values).mean(axis=0)
+    importance_df = pd.DataFrame({
+        'Feature': X_train.columns,
+        'Importance': feature_importance
+    }).sort_values('Importance', ascending=False)
+    
+    # 打印所有特征的重要性
+    for i, (idx, row) in enumerate(importance_df.iterrows(), 1):
+        print(f"{i:2d}. {row['Feature']:.<25} {row['Importance']:.4f}")
+    
+    # 保存特征重要性到CSV文件
+    importance_df.to_csv('feature_importance_shap.csv', index=False)
+    print(f"\n✓ Feature importance saved to 'feature_importance_shap.csv'")
+    
+    # 输出特征影响的总体方向
+    print("\n" + "="*50)
+    print("Feature Impact Direction Analysis:")
+    print("="*50)
+    
+    mean_shap_values = shap_values.mean(axis=0)
+    for i, feature in enumerate(X_train.columns):
+        direction = "Positive" if mean_shap_values[i] > 0 else "Negative"
+        print(f"{feature:.<25} Overall {direction} impact (mean: {mean_shap_values[i]:.4f})")
+        
+except ImportError as e:
+    print(f"❌ SHAP library not installed, please run: pip install shap")
+    print(f"Error details: {e}")
+except Exception as e:
+    print(f"❌ SHAP analysis failed: {e}")
+    import traceback
+    print(f"Detailed error:\n{traceback.format_exc()}")
+    
+    # 方法2：备用方案 - 使用单个随机森林模型进行SHAP分析
+    print("\n" + "="*50)
+    print("Trying backup method: Using single Random Forest model...")
+    print("="*50)
+    
+    try:
+        # 训练一个单独的随机森林模型用于SHAP分析
+        rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+        rf_model.fit(X_train_scaled, y_train_split)
+        
+        import shap
+        import matplotlib.pyplot as plt
+        
+        # 准备数据
+        X_train_full_df = pd.DataFrame(X_train_scaled, columns=X_train.columns)
+        sample_size = min(100, len(X_train_full_df))
+        X_train_sample = X_train_full_df.sample(sample_size, random_state=42)
+        X_train_sample_scaled = X_train_sample.values
+        
+        print(f"Using {sample_size} samples for SHAP analysis...")
+        
+        # 使用TreeExplainer
+        explainer = shap.TreeExplainer(rf_model)
+        shap_values = explainer.shap_values(X_train_sample_scaled)
+        
+        # 处理SHAP值
+        if isinstance(shap_values, list) and len(shap_values) == 2:
+            shap_values_positive = shap_values[1]  # 正类的SHAP值
+        else:
+            shap_values_positive = shap_values
+            
+        print("Plotting SHAP summary plot...")
+        # 调整图形尺寸为更窄的格式
+        plt.figure(figsize=(6, 8))
+        
+        shap.summary_plot(shap_values_positive, 
+                         X_train_sample,
+                         feature_names=X_train.columns.tolist(),
+                         show=False)
+        
+        # 调整X轴范围到-0.5到0.5
+        current_axis = plt.gca()
+        x_min = -0.5
+        x_max = 0.5
+        current_axis.set_xlim(x_min, x_max)
+        
+        # 设置X轴刻度
+        current_axis.set_xticks([-0.5, -0.25, 0.0, 0.25, 0.5])
+        
+        # 删除标题
+        plt.xlabel("SHAP value (impact on model output)", fontsize=11)
+        plt.tight_layout()
+        
+        plt.savefig('SHAP_Summary_Backup.png', dpi=300, bbox_inches='tight', facecolor='white')
+        plt.show()
+        
+        print("✓ Backup SHAP analysis completed!")
+        print("✓ Plot saved as 'SHAP_Summary_Backup.png'")
+        
+    except Exception as e2:
+        print(f"❌ Backup method also failed: {e2}")
+
+print("\n" + "="*50)
+print("All analysis completed!")
+print("="*50)
