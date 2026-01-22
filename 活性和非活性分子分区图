@@ -1,0 +1,45 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+# 读取数据
+df = pd.read_csv('processed_data.csv')
+
+# 创建图形
+fig, ax = plt.subplots(figsize=(10, 6))
+
+# 使用原图相似的颜色
+active_color = 'red'  # 橙色
+inactive_color = 'blue'  # 蓝色
+
+# 分离数据
+active_data = df[df['activity'] == 'active']['pic50']
+inactive_data = df[df['activity'] == 'inactive']['pic50']
+
+# 创建直方图
+bins = np.linspace(0, 10, 21)  # 20个区间
+
+# 绘制直方图
+n_active, bins, patches_active = ax.hist(active_data, bins=bins, alpha=0.7, 
+                                        color=active_color, label='active',
+                                        edgecolor='black', linewidth=0.5)
+n_inactive, bins, patches_inactive = ax.hist(inactive_data, bins=bins, alpha=0.7, 
+                                           color=inactive_color, label='inactive',
+                                           edgecolor='black', linewidth=0.5)
+
+# 设置标签和标题
+ax.set_xlabel('pIC50', fontsize=12, fontweight='bold')
+ax.set_ylabel('Frequency', fontsize=12, fontweight='bold')
+
+# 设置x轴范围
+ax.set_xlim(0, 10)
+
+# 添加图例
+ax.legend()
+
+# 添加网格
+ax.grid(False)
+
+plt.tight_layout()
+plt.show()
+
