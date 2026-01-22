@@ -1,0 +1,517 @@
+import pandas as pd
+import numpy as np
+from imblearn.ensemble import EasyEnsembleClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, balanced_accuracy_score, matthews_corrcoef, roc_curve, auc, precision_recall_curve, average_precision_score
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+# 读取文件
+df_train = pd.read_csv('9descriptors.csv')
+df_predict = pd.read_csv('9descriptors_with_names.csv')
+
+print(f"训练数据形状: {df_train.shape}")
+print(f"预测数据形状: {df_predict.shape}")
+
+# 先查看列名
+print(f"训练数据列名: {df_train.columns.tolist()}")
+print(f"预测数据列名: {df_predict.columns.tolist()}")
+
+# 数据预处理
+# 训练数据：前9列为描述符，最后一列为标签
+X_train = df_train.iloc[:, :9]  # 前9列为描述符
+y_train = df_train.iloc[:, -1]  # 最后一列为标签
+
+# 预测数据：需要确保选择的是数值列
+# 先检查哪些列是数值类型
+print(f"\n预测数据各列数据类型:")
+for col in df_predict.columns:
+    print(f"{col}: {df_predict[col].dtype}")
+
+# 选择数值列作为特征
+numeric_columns = []
+for col in df_predict.columns:
+    if df_predict[col].dtype in ['int64', 'float64']:
+        numeric_columns.append(col)
+
+print(f"数值列: {numeric_columns}")
+
+# 使用数值列作为特征
+X_predict = df_predict[numeric_columns]
+
+# 分子名称列 - 选择非数值列
+non_numeric_columns = [col for col in df_predict.columns if col not in numeric_columns]
+if non_numeric_columns:
+    molecule_names = df_predict[non_numeric_columns[0]]  # 使用第一个非数值列作为分子名称
+    print(f"使用 '{non_numeric_columns[0]}' 作为分子名称列")
+else:
+    molecule_names = pd.Series([f"Mol_{i+1}" for i in range(len(df_predict))])
+    print("未找到分子名称列，使用自动生成名称")
+
+print(f"训练特征维度: {X_train.shape}")
+print(f"预测特征维度: {X_predict.shape}")
+print(f"训练标签分布:\n{y_train.value_counts()}")
+
+# 确保特征数量匹配
+if X_train.shape[1] != X_predict.shape[1]:
+    print(f"警告: 训练数据有 {X_train.shape[1]} 个特征，预测数据有 {X_predict.shape[1]} 个特征")
+    # 如果特征数量不匹配，使用前n个共同特征
+    common_features = min(X_train.shape[1], X_predict.shape[1])
+    X_train = X_train.iloc[:, :common_features]
+    X_predict = X_predict.iloc[:, :common_features]
+    print(f"使用前 {common_features} 个共同特征")
+
+# 标准化
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_predict_scaled = scaler.transform(X_predict)
+
+# ================= 10折交叉验证训练和评估模型 =================
+print("\n" + "="*60)
+print("10折交叉验证训练和评估模型")
+print("="*60)
+print(f"总样本数: {len(y_train)}")
+print(f"10折CV: 每折训练样本约 {int(0.9*len(y_train))} 个, 验证样本约 {int(0.1*len(y_train))} 个")
+
+# 定义三个模型
+models_config = {
+    'Random Forest (RF)': RandomForestClassifier(n_estimators=100, random_state=42),
+    'Balanced Random Forest (BalancedRF)': RandomForestClassifier(n_estimators=100, class_weight='balanced', random_state=42),
+    'EasyEnsemble': EasyEnsembleClassifier(
+        n_estimators=10,
+        estimator=RandomForestClassifier(n_estimators=100, random_state=42),
+        random_state=42
+    )
+}
+
+# 创建10折分层交叉验证
+skf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+
+# 存储所有模型的交叉验证结果
+all_cv_results = {}
+all_cv_metrics = {}
+
+# 为绘图存储数据
+roc_data = {}
+pr_data = {}
+
+# 存储最佳模型相关信息
+best_model_name = None
+best_model_score = -1
+best_model = None
+
+for model_name, model in models_config.items():
+    print(f"\n--- {model_name} ---")
+    
+    # 存储该模型的指标
+    cv_metrics = {
+        'accuracy': [],
+        'balanced_accuracy': [],
+        'precision': [],
+        'recall': [],
+        'f1': [],
+        'mcc': [],
+        'roc_auc': [],
+        'pr_auc': []  # 添加PR AUC
+    }
+    
+    # 为绘图存储数据
+    roc_data[model_name] = {'fpr': [], 'tpr': [], 'auc': []}
+    pr_data[model_name] = {'precision': [], 'recall': [], 'auc': []}
+    
+    # 执行交叉验证
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_train_scaled, y_train), 1):
+        X_cv_train, X_cv_val = X_train_scaled[train_idx], X_train_scaled[val_idx]
+        y_cv_train, y_cv_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
+        
+        # 训练模型
+        model.fit(X_cv_train, y_cv_train)
+        
+        # 预测
+        y_cv_pred = model.predict(X_cv_val)
+        y_cv_proba = model.predict_proba(X_cv_val)[:, 1] if hasattr(model, 'predict_proba') else None
+        
+        # 计算指标
+        cv_metrics['accuracy'].append(accuracy_score(y_cv_val, y_cv_pred))
+        cv_metrics['balanced_accuracy'].append(balanced_accuracy_score(y_cv_val, y_cv_pred))
+        cv_metrics['precision'].append(precision_score(y_cv_val, y_cv_pred, zero_division=0))
+        cv_metrics['recall'].append(recall_score(y_cv_val, y_cv_pred, zero_division=0))
+        cv_metrics['f1'].append(f1_score(y_cv_val, y_cv_pred, zero_division=0))
+        cv_metrics['mcc'].append(matthews_corrcoef(y_cv_val, y_cv_pred))
+        
+        if y_cv_proba is not None:
+            cv_metrics['roc_auc'].append(roc_auc_score(y_cv_val, y_cv_proba))
+            # 计算PR AUC
+            precision_curve, recall_curve, _ = precision_recall_curve(y_cv_val, y_cv_proba)
+            pr_auc = average_precision_score(y_cv_val, y_cv_proba)
+            cv_metrics['pr_auc'].append(pr_auc)
+            
+            # 存储ROC和PR数据
+            fpr, tpr, _ = roc_curve(y_cv_val, y_cv_proba)
+            roc_data[model_name]['fpr'].append(fpr)
+            roc_data[model_name]['tpr'].append(tpr)
+            roc_data[model_name]['auc'].append(roc_auc_score(y_cv_val, y_cv_proba))
+            
+            pr_data[model_name]['precision'].append(precision_curve)
+            pr_data[model_name]['recall'].append(recall_curve)
+            pr_data[model_name]['auc'].append(pr_auc)
+        else:
+            cv_metrics['roc_auc'].append(np.nan)
+            cv_metrics['pr_auc'].append(np.nan)
+        
+        # 每2折打印一次结果，避免输出太多
+        if fold % 2 == 0 or fold == 10:
+            auc_value = cv_metrics['roc_auc'][-1]
+            if not np.isnan(auc_value):
+                print(f"折 {fold:2d}: "
+                      f"Acc={cv_metrics['accuracy'][-1]:.4f}, "
+                      f"BA={cv_metrics['balanced_accuracy'][-1]:.4f}, "
+                      f"Prec={cv_metrics['precision'][-1]:.4f}, "
+                      f"Rec={cv_metrics['recall'][-1]:.4f}, "
+                      f"F1={cv_metrics['f1'][-1]:.4f}, "
+                      f"MCC={cv_metrics['mcc'][-1]:.4f}, "
+                      f"AUC={auc_value:.4f}")
+            else:
+                print(f"折 {fold:2d}: "
+                      f"Acc={cv_metrics['accuracy'][-1]:.4f}, "
+                      f"BA={cv_metrics['balanced_accuracy'][-1]:.4f}, "
+                      f"Prec={cv_metrics['precision'][-1]:.4f}, "
+                      f"Rec={cv_metrics['recall'][-1]:.4f}, "
+                      f"F1={cv_metrics['f1'][-1]:.4f}, "
+                      f"MCC={cv_metrics['mcc'][-1]:.4f}, "
+                      f"AUC=N/A")
+    
+    # 计算平均指标和标准差
+    avg_metrics = {}
+    for metric_name, values in cv_metrics.items():
+        if values and not all(np.isnan(v) for v in values):  # 确保列表不为空且不全为nan
+            valid_values = [v for v in values if not np.isnan(v)]
+            if valid_values:  # 如果有有效值
+                avg_metrics[metric_name] = np.mean(valid_values)
+                avg_metrics[f'{metric_name}_std'] = np.std(valid_values)
+                # 格式化为平均值±标准差
+                avg_metrics[f'{metric_name}_formatted'] = f"{avg_metrics[metric_name]:.4f} ± {avg_metrics[f'{metric_name}_std']:.4f}"
+            else:
+                avg_metrics[metric_name] = np.nan
+                avg_metrics[f'{metric_name}_std'] = np.nan
+                avg_metrics[f'{metric_name}_formatted'] = "N/A"
+        else:
+            avg_metrics[metric_name] = np.nan
+            avg_metrics[f'{metric_name}_std'] = np.nan
+            avg_metrics[f'{metric_name}_formatted'] = "N/A"
+    
+    all_cv_results[model_name] = avg_metrics
+    all_cv_metrics[model_name] = cv_metrics
+    
+    print(f"平均指标 ± 标准差:")
+    print(f"  准确率: {avg_metrics['accuracy_formatted']}")
+    print(f"  平衡准确率: {avg_metrics['balanced_accuracy_formatted']}")
+    print(f"  精确率: {avg_metrics['precision_formatted']}")
+    print(f"  召回率: {avg_metrics['recall_formatted']}")
+    print(f"  F1分数: {avg_metrics['f1_formatted']}")
+    print(f"  MCC: {avg_metrics['mcc_formatted']}")
+    if not np.isnan(avg_metrics['roc_auc']):
+        print(f"  ROC AUC: {avg_metrics['roc_auc_formatted']}")
+    if not np.isnan(avg_metrics['pr_auc']):
+        print(f"  PR AUC: {avg_metrics['pr_auc_formatted']}")
+    
+    # 检查当前模型是否是最佳模型（基于平均AUC）
+    if not np.isnan(avg_metrics['roc_auc']) and avg_metrics['roc_auc'] > best_model_score:
+        best_model_score = avg_metrics['roc_auc']
+        best_model_name = model_name
+        best_model = models_config[model_name]
+
+print(f"\n✓ 根据平均AUC选择的最佳模型: {best_model_name} (平均AUC = {best_model_score:.4f})")
+
+# ================= 使用最佳模型进行预测 =================
+print("\n" + "="*60)
+print(f"使用最佳模型 ({best_model_name}) 进行预测")
+print("="*60)
+
+# 在整个数据集上重新训练最佳模型
+best_model.fit(X_train_scaled, y_train)
+
+# 预测新数据
+predictions = best_model.predict(X_predict_scaled)
+probabilities = best_model.predict_proba(X_predict_scaled)[:, 1] if hasattr(best_model, 'predict_proba') else None
+
+# 保存结果
+results_df = pd.DataFrame({
+    'Molecule_Name': molecule_names,
+    'Prediction': predictions,
+    'Probability': probabilities if probabilities is not None else np.nan
+})
+results_df.to_csv('best_model_10cv_predictions.csv', index=False)
+
+print(f"预测完成! 共预测 {len(predictions)} 个分子")
+print("结果已保存到: best_model_10cv_predictions.csv")
+
+# ================= 绘制三个模型的ROC和PR曲线在同一图上 =================
+print("\n" + "="*60)
+print("绘制三个模型的ROC和PR曲线")
+print("="*60)
+
+# 设置图形
+plt.rcParams['font.size'] = 14
+fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+
+# 定义模型颜色和线型
+model_colors = {
+    'Random Forest (RF)': '#1f77b4',  # 蓝色
+    'Balanced Random Forest (BalancedRF)': '#ff7f0e',  # 橙色
+    'EasyEnsemble': '#2ca02c'  # 绿色
+}
+
+model_linewidths = {
+    'Random Forest (RF)': 3,
+    'Balanced Random Forest (BalancedRF)': 3,
+    'EasyEnsemble': 3
+}
+
+# 计算并绘制每个模型的平均ROC曲线
+for model_name in models_config.keys():
+    if model_name in roc_data and roc_data[model_name]['fpr']:
+        # 计算平均ROC曲线
+        mean_fpr = np.linspace(0, 1, 100)
+        mean_tpr = []
+        tprs = []
+        
+        for i in range(min(10, len(roc_data[model_name]['fpr']))):  # 最多10折
+            if i < len(roc_data[model_name]['fpr']):
+                fpr = roc_data[model_name]['fpr'][i]
+                tpr = roc_data[model_name]['tpr'][i]
+                if len(fpr) > 1 and len(tpr) > 1:  # 确保有数据
+                    interp_tpr = np.interp(mean_fpr, fpr, tpr)
+                    interp_tpr[0] = 0.0
+                    tprs.append(interp_tpr)
+        
+        if tprs:
+            mean_tpr = np.mean(tprs, axis=0)
+            mean_tpr[-1] = 1.0
+            mean_auc = np.mean(roc_data[model_name]['auc'][:len(tprs)])
+            std_auc = np.std(roc_data[model_name]['auc'][:len(tprs)])
+            
+            # 根据模型名称生成简写标签
+            if model_name == 'Random Forest (RF)':
+                label_text = f'RF (AUC = {mean_auc:.3f})'
+            elif model_name == 'Balanced Random Forest (BalancedRF)':
+                label_text = f'BalancedRF (AUC = {mean_auc:.3f})'
+            else:
+                label_text = f'{model_name} (AUC = {mean_auc:.3f})'
+            
+            # 绘制平均ROC曲线
+            axes[0].plot(mean_fpr, mean_tpr, color=model_colors[model_name],
+                         lw=model_linewidths[model_name],
+                         label=label_text)
+    
+    # 绘制ROC对角线
+    axes[0].plot([0, 1], [0, 1], color='grey', lw=2, linestyle='--', alpha=0.7)
+    
+    # 设置ROC图属性
+    axes[0].set_xlim([-0.02, 1.02])
+    axes[0].set_ylim([-0.02, 1.02])
+    axes[0].set_xlabel('False Positive Rate', fontsize=14)
+    axes[0].set_ylabel('True Positive Rate', fontsize=14)
+    axes[0].legend(loc="lower right", fontsize=14)
+    axes[0].grid(True, linestyle='--', linewidth=0.5, color='grey', alpha=0.5)
+
+# 计算并绘制每个模型的平均PR曲线
+for model_name in models_config.keys():
+    if model_name in pr_data and pr_data[model_name]['recall']:
+        # 计算平均PR曲线
+        mean_recall = np.linspace(0, 1, 100)
+        mean_precision = []
+        precisions = []
+        
+        for i in range(min(10, len(pr_data[model_name]['recall']))):  # 最多10折
+            if i < len(pr_data[model_name]['recall']):
+                recall = pr_data[model_name]['recall'][i]
+                precision = pr_data[model_name]['precision'][i]
+                if len(recall) > 1 and len(precision) > 1:  # 确保有数据
+                    # 确保数组是降序的
+                    recall = np.array(recall)
+                    precision = np.array(precision)
+                    # 反转数组以确保recall是递增的
+                    if len(recall) > 1 and recall[0] > recall[-1]:
+                        recall = recall[::-1]
+                        precision = precision[::-1]
+                    
+                    interp_precision = np.interp(mean_recall, recall, precision, left=1.0, right=0.0)
+                    precisions.append(interp_precision)
+        
+        if precisions:
+            mean_precision = np.mean(precisions, axis=0)
+            mean_pr_auc = np.mean(pr_data[model_name]['auc'][:len(precisions)])
+            std_pr_auc = np.std(pr_data[model_name]['auc'][:len(precisions)])
+            
+            # 根据模型名称生成简写标签
+            if model_name == 'Random Forest (RF)':
+                label_text = f'RF (AP = {mean_pr_auc:.3f})'
+            elif model_name == 'Balanced Random Forest (BalancedRF)':
+                label_text = f'BalancedRF (AP = {mean_pr_auc:.3f})'
+            else:
+                label_text = f'{model_name} (AP = {mean_pr_auc:.3f})'
+            
+            # 绘制平均PR曲线
+            axes[1].plot(mean_recall, mean_precision, color=model_colors[model_name],
+                         lw=model_linewidths[model_name],
+                         label=label_text)
+    
+    # 设置PR图属性
+    axes[1].set_xlim([-0.02, 1.02])
+    axes[1].set_ylim([-0.02, 1.02])
+    axes[1].set_xlabel('Recall', fontsize=14)
+    axes[1].set_ylabel('Precision', fontsize=14)
+    axes[1].legend(loc="lower left", fontsize=14)
+    axes[1].grid(True, linestyle='--', linewidth=0.5, color='grey', alpha=0.5)
+
+plt.tight_layout()
+plt.savefig('10cv_models_ROC_PR_comparison.png', dpi=300, bbox_inches='tight')
+plt.savefig('10cv_models_ROC_PR_comparison.pdf', bbox_inches='tight')
+plt.show()
+
+print("ROC和PR对比图已保存")
+
+# ================= 输出详细的性能对比表格（论文格式） =================
+print("\n" + "="*60)
+print("10折交叉验证性能对比表（论文格式）")
+print("="*60)
+
+# 创建详细对比表格 - 论文格式
+paper_comparison_data = []
+for model_name in models_config.keys():
+    metrics = all_cv_results[model_name]
+    # 判断是否为最佳模型（加粗标记）
+    is_best = (model_name == best_model_name)
+    
+    # 格式化每个指标
+    paper_comparison_data.append({
+        'Model': model_name,
+        'Accuracy': metrics['accuracy_formatted'],
+        'Balanced Accuracy': metrics['balanced_accuracy_formatted'],
+        'Precision': metrics['precision_formatted'],
+        'Recall': metrics['recall_formatted'],
+        'F1-score': metrics['f1_formatted'],
+        'MCC': metrics['mcc_formatted'],
+        'ROC-AUC': metrics['roc_auc_formatted'],
+        'PR-AUC': metrics['pr_auc_formatted']
+    })
+
+paper_comparison_df = pd.DataFrame(paper_comparison_data)
+
+# 打印表格（带边框）
+print("\n性能对比表（平均值 ± 标准差）:")
+print("="*90)
+print(f"{'Model':<30} {'Accuracy':<15} {'Balanced Acc':<15} {'Precision':<15} {'Recall':<15} {'F1-score':<15} {'MCC':<15} {'ROC-AUC':<15} {'PR-AUC':<15}")
+print("="*90)
+
+for idx, row in paper_comparison_df.iterrows():
+    # 加粗显示最佳模型
+    if row['Model'] == best_model_name:
+        print(f"{'*' + row['Model']:<30} {row['Accuracy']:<15} {row['Balanced Accuracy']:<15} "
+              f"{row['Precision']:<15} {row['Recall']:<15} {row['F1-score']:<15} "
+              f"{row['MCC']:<15} {row['ROC-AUC']:<15} {row['PR-AUC']:<15}")
+    else:
+        print(f"{row['Model']:<30} {row['Accuracy']:<15} {row['Balanced Accuracy']:<15} "
+              f"{row['Precision']:<15} {row['Recall']:<15} {row['F1-score']:<15} "
+              f"{row['MCC']:<15} {row['ROC-AUC']:<15} {row['PR-AUC']:<15}")
+
+print("="*90)
+print("*表示最佳模型")
+
+# 保存为CSV（用于论文表格）
+paper_comparison_df.to_csv('10cv_paper_comparison_table.csv', index=False)
+print("\n论文格式对比表格已保存到: 10cv_paper_comparison_table.csv")
+
+# ================= 保存更简洁的LaTeX格式表格 =================
+print("\n生成LaTeX格式表格...")
+latex_table = """
+\\begin{table}[htbp]
+\\centering
+\\caption{10-fold cross-validation performance comparison of different models (mean ± standard deviation)}
+\\label{tab:model_comparison}
+\\begin{tabular}{lccccccc}
+\\toprule
+\\textbf{Model} & \\textbf{Accuracy} & \\textbf{Precision} & \\textbf{Recall} & \\textbf{F1-score} & \\textbf{MCC} & \\textbf{ROC-AUC} & \\textbf{PR-AUC} \\\\
+\\midrule
+"""
+
+for idx, row in paper_comparison_df.iterrows():
+    model_name = row['Model']
+    if model_name == best_model_name:
+        model_name = "\\textbf{" + model_name + "}"
+    latex_table += f"{model_name} & {row['Accuracy']} & {row['Precision']} & {row['Recall']} & {row['F1-score']} & {row['MCC']} & {row['ROC-AUC']} & {row['PR-AUC']} \\\\\\\\\n"
+
+latex_table += """\\bottomrule
+\\end{tabular}
+\\end{table}"""
+
+# 保存LaTeX表格
+with open('10cv_latex_table.tex', 'w', encoding='utf-8') as f:
+    f.write(latex_table)
+
+print("LaTeX表格已保存到: 10cv_latex_table.tex")
+
+# ================= 保存详细的性能数据（用于统计分析） =================
+print("\n保存详细性能数据用于统计分析...")
+
+detailed_results = []
+for model_name in models_config.keys():
+    metrics = all_cv_metrics[model_name]
+    for fold in range(len(metrics['accuracy'])):
+        detailed_results.append({
+            'Model': model_name,
+            'Fold': fold + 1,
+            'Accuracy': metrics['accuracy'][fold] if fold < len(metrics['accuracy']) else np.nan,
+            'Balanced_Accuracy': metrics['balanced_accuracy'][fold] if fold < len(metrics['balanced_accuracy']) else np.nan,
+            'Precision': metrics['precision'][fold] if fold < len(metrics['precision']) else np.nan,
+            'Recall': metrics['recall'][fold] if fold < len(metrics['recall']) else np.nan,
+            'F1_score': metrics['f1'][fold] if fold < len(metrics['f1']) else np.nan,
+            'MCC': metrics['mcc'][fold] if fold < len(metrics['mcc']) else np.nan,
+            'ROC_AUC': metrics['roc_auc'][fold] if fold < len(metrics['roc_auc']) else np.nan,
+            'PR_AUC': metrics['pr_auc'][fold] if fold < len(metrics['pr_auc']) else np.nan
+        })
+
+detailed_df = pd.DataFrame(detailed_results)
+detailed_df.to_csv('10cv_detailed_performance_data.csv', index=False)
+print("详细性能数据已保存到: 10cv_detailed_performance_data.csv")
+
+# ================= 输出最佳模型的详细统计 =================
+print("\n" + "="*60)
+print(f"最佳模型 ({best_model_name}) 详细统计")
+print("="*60)
+
+if best_model_name in all_cv_metrics:
+    best_metrics = all_cv_metrics[best_model_name]
+    print(f"\n{best_model_name} 10折交叉验证统计摘要:")
+    
+    for metric_name in ['accuracy', 'balanced_accuracy', 'precision', 'recall', 'f1', 'mcc', 'roc_auc', 'pr_auc']:
+        if metric_name in best_metrics:
+            values = best_metrics[metric_name]
+            valid_values = [v for v in values if not np.isnan(v)]
+            if valid_values:
+                print(f"\n{metric_name.upper()}:")
+                print(f"  平均值: {np.mean(valid_values):.4f}")
+                print(f"  标准差: {np.std(valid_values):.4f}")
+                print(f"  最小值: {np.min(valid_values):.4f}")
+                print(f"  中位数: {np.median(valid_values):.4f}")
+                print(f"  最大值: {np.max(valid_values):.4f}")
+                print(f"  范围: [{np.min(valid_values):.4f}, {np.max(valid_values):.4f}]")
+
+print("\n" + "="*60)
+print("总结")
+print("="*60)
+print(f"总样本数: {len(y_train)}")
+print(f"10折交叉验证: 每折训练样本约 {int(0.9*len(y_train))} 个, 验证样本约 {int(0.1*len(y_train))} 个")
+print(f"最佳模型: {best_model_name}")
+print(f"最佳模型平均AUC: {best_model_score:.4f}")
+
+print(f"\n生成的文件:")
+print(f"  1. 预测结果: best_model_10cv_predictions.csv")
+print(f"  2. ROC/PR对比图: 10cv_models_ROC_PR_comparison.png/pdf")
+print(f"  3. 论文格式表格: 10cv_paper_comparison_table.csv")
+print(f"  4. LaTeX表格: 10cv_latex_table.tex")
+print(f"  5. 详细性能数据: 10cv_detailed_performance_data.csv")
+print("="*60)
+
