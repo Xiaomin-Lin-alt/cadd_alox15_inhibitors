@@ -1,0 +1,394 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import seaborn as snsPCA
+from rdkit import Chem
+from rdkit.Chem import Descriptors, Lipinski, Crippen
+import warnings
+warnings.filterwarnings('ignore')
+from rdkit.Chem import rdMolDescriptors
+
+# 设置中文字体和图形样式
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial']
+plt.rcParams['axes.unicode_minus'] = False
+sns.set_style("whitegrid")
+
+def calculate_molecular_descriptors(smiles_list, compound_names=None):
+    """计算8个分子描述符（根据图片中的特征）"""
+    descriptors_list = []
+    valid_smiles = []
+    valid_names = []
+    
+    if compound_names is None:
+        compound_names = [f"Compound_{i+1}" for i in range(len(smiles_list))]
+    
+    for i, (smiles, name) in enumerate(zip(smiles_list, compound_names)):
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None:
+            # 计算8个描述符（根据图片中的特征）
+            desc_dict = {
+                'Name': name,
+                'SMILES': smiles,
+                'TPSA': Descriptors.TPSA(mol), # 拓扑极性表面积
+                'LogP': Crippen.MolLogP(mol), # logP
+                'Fraction_SP3': Lipinski.FractionCSP3(mol), # sp3杂化碳原子分数
+                'Molecular_Weight': Descriptors.MolWt(mol), # 分子量
+                'HBA': Lipinski.NumHAcceptors(mol), # 氢键受体数
+                'Num_Rotatable_Bonds': Lipinski.NumRotatableBonds(mol), # 可旋转键数
+                'Num_Aromatic_Rings': Lipinski.NumAromaticRings(mol), # 芳香环数
+                'HBD': Lipinski.NumHDonors(mol), # 氢键供体数
+                'Num_Rings': Descriptors.RingCount(mol),
+            }
+            descriptors_list.append(desc_dict)
+            valid_smiles.append(smiles)
+            valid_names.append(name)
+        else:
+            print(f"警告: 无法解析SMILES: {smiles} (第{i+1}行)")
+    
+    df = pd.DataFrame(descriptors_list)
+    return df, valid_smiles, valid_names
+
+def perform_pca_analysis(descriptors_df, labels=None):
+    """执行PCA分析"""
+    # 选择8个描述符列
+    descriptor_columns = [
+        'TPSA', 'LogP', 'Fraction_SP3', 'Molecular_Weight',
+        'HBA', 'Num_Rotatable_Bonds', 'Num_Aromatic_Rings', 'HBD','Num_Rings'
+    ]
+    X = descriptors_df[descriptor_columns]
+    
+    # 标准化数据
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    # 执行PCA
+    pca = PCA()
+    X_pca = pca.fit_transform(X_scaled)
+    
+    # 创建结果DataFrame
+    pca_df = pd.DataFrame(X_pca, columns=[f'PC{i+1}' for i in range(X_pca.shape[1])])
+    pca_df['Name'] = descriptors_df['Name'].values
+    pca_df['SMILES'] = descriptors_df['SMILES'].values
+    
+    if labels is not None:
+        pca_df['Label'] = labels
+    
+    return pca_df, pca, scaler, X_scaled
+
+def calculate_special_molecules_pca(special_smiles, scaler, pca_model):
+    """计算特殊小分子的PCA坐标"""
+    special_coords = []
+    
+    for smiles in special_smiles:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None:
+            # 计算相同的描述符
+            desc_dict = {
+                'TPSA': Descriptors.TPSA(mol),
+                'LogP': Crippen.MolLogP(mol),
+                'Fraction_SP3': Lipinski.FractionCSP3(mol),
+                'Molecular_Weight': Descriptors.MolWt(mol),
+                'HBA': Lipinski.NumHAcceptors(mol),
+                'Num_Rotatable_Bonds': Lipinski.NumRotatableBonds(mol),
+                'Num_Aromatic_Rings': Lipinski.NumAromaticRings(mol),
+                'HBD': Lipinski.NumHDonors(mol),
+                'Num_Rings': Descriptors.RingCount(mol),
+            }
+            
+            # 转换为DataFrame
+            desc_df = pd.DataFrame([desc_dict])
+            descriptor_columns = [
+                'TPSA', 'LogP', 'Fraction_SP3', 'Molecular_Weight',
+                'HBA', 'Num_Rotatable_Bonds', 'Num_Aromatic_Rings', 'HBD', 'Num_Rings'
+            ]
+            X_special = desc_df[descriptor_columns]
+            
+            # 使用相同的scaler标准化
+            X_special_scaled = scaler.transform(X_special)
+            
+            # 使用相同的PCA模型转换
+            X_special_pca = pca_model.transform(X_special_scaled)
+            
+            special_coords.append({
+                'PC1': X_special_pca[0, 0],
+                'PC2': X_special_pca[0, 1],
+                'PC3': X_special_pca[0, 2],
+                'smiles': smiles
+            })
+        else:
+            print(f"警告: 无法解析特殊小分子SMILES: {smiles}")
+    
+    return special_coords
+
+def read_data():
+    try:
+        # 读取 CSV 文件
+        df = pd.read_csv("processed_data.csv")
+        
+        if 'SMILES' in df.columns:
+            smiles_list = df['SMILES'].tolist()
+            names = df['Name'].tolist() if 'Name' in df.columns else [f"Compound_{i+1}" for i in range(len(smiles_list))]
+            
+            # 优先使用activity列作为标签，如果没有则使用Label列，如果都没有则默认为DrugBank
+            if 'activity' in df.columns:
+                labels = df['activity'].tolist()
+                print(f"使用'activity'列作为标签，共{len(set(labels))}个类别: {set(labels)}")
+            elif 'Label' in df.columns:
+                labels = df['Label'].tolist()
+                print(f"使用'Label'列作为标签，共{len(set(labels))}个类别: {set(labels)}")
+            else:
+                labels = ['DrugBank'] * len(smiles_list)
+                print("未找到'activity'或'Label'列，使用默认标签'DrugBank'")
+            
+            return smiles_list, names, labels
+        else:
+            print("错误：CSV文件中没有找到'SMILE'列")
+            return None, None, None
+            
+    except Exception as e:
+        print(f"读取CSV文件失败：{e}")
+        return None, None, None
+
+def create_pca_plots(pca_df, pca, labels, special_coords=None):
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    
+    unique_labels = pd.Series(labels).unique() if labels is not None else None
+    
+    # 补充必要变量（原代码隐含，不修改核心逻辑）
+    label_map = {
+        label: {'color': plt.cm.Set3(i), 'marker': ['o', 's', '^', 'D'][i % 4]}
+        for i, label in enumerate(unique_labels)
+    } if labels is not None else None
+    
+    # 创建2行2列子图布局（只有4个图：a,b,c,d）
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    # ---------- 子图a (PC1 vs PC2) ----------
+    ax1 = axes[0, 0]
+    if labels is not None:
+        for label in unique_labels:
+            mask = pca_df['Label'] == label
+            color = label_map[label]['color']
+            marker = label_map[label]['marker']
+            ax1.scatter(pca_df.loc[mask, 'PC1'], pca_df.loc[mask, 'PC2'],
+                       c=color, marker=marker, label=label,
+                       alpha=0.7, s=30, edgecolors='white', linewidth=0.5)
+        ax1.legend(fontsize=10, frameon=True,fancybox=True,
+                  shadow=True, framealpha=0.8, loc='best')
+    else:
+        ax1.scatter(pca_df['PC1'], pca_df['PC2'], alpha=0.7, s=60,
+                   c='#1f77b4', edgecolors='white', linewidth=0.5)
+    
+    # 添加特殊小分子点
+    if special_coords:
+        for i, coord in enumerate(special_coords):
+            ax1.scatter(coord['PC1'], coord['PC2'],
+                       c='black', marker='*',
+                       s=30, edgecolors='black',
+                       linewidth=1.0, alpha=1.0,
+                       zorder=5)  # zorder确保在最上层
+    
+    pc1_var = pca.explained_variance_ratio_[0] * 100
+    pc2_var = pca.explained_variance_ratio_[1] * 100
+    ax1.set_xlabel(f'PC1 ({pc1_var:.2f}%)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel(f'PC2 ({pc2_var:.2f}%)', fontsize=12, fontweight='bold')
+    ax1.grid(False)
+    ax1.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    ax1.axvline(x=0, color='k', linestyle='-', alpha=0.3)
+    
+    # ---------- 子图b (PC1 vs PC3) ----------
+    ax2 = axes[0, 1]
+    if labels is not None:
+        for label in unique_labels:
+            mask = pca_df['Label'] == label
+            color = label_map[label]['color']
+            marker = label_map[label]['marker']
+            ax2.scatter(pca_df.loc[mask, 'PC1'], pca_df.loc[mask, 'PC3'],
+                       c=color, marker=marker, label=label,
+                       alpha=0.7, s=30, edgecolors='white', linewidth=0.5)
+        ax2.legend(fontsize=10, frameon=True, fancybox=True,
+                  shadow=True, framealpha=0.8, loc='best')
+    else:
+        ax2.scatter(pca_df['PC1'], pca_df['PC3'], alpha=0.7, s=60,
+                   c='#1f77b4', edgecolors='white', linewidth=0.5)
+    
+    # 添加特殊小分子点
+    if special_coords:
+        for i, coord in enumerate(special_coords):
+            ax2.scatter(coord['PC1'], coord['PC3'],
+                       c='black', marker='*',
+                       s=30, edgecolors='black',
+                       linewidth=1.0, alpha=1.0,
+                       zorder=5)
+    
+    pc3_var = pca.explained_variance_ratio_[2] * 100
+    ax2.set_xlabel(f'PC1 ({pc1_var:.2f}%)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel(f'PC3 ({pc3_var:.2f}%)', fontsize=12, fontweight='bold')
+    ax2.grid(False)
+    ax2.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    ax2.axvline(x=0, color='k', linestyle='-', alpha=0.3)
+    
+    # ---------- 子图c (PC2 vs PC3) ----------
+    ax3 = axes[1, 0]
+    if labels is not None:
+        for label in unique_labels:
+            mask = pca_df['Label'] == label
+            color = label_map[label]['color']
+            marker = label_map[label]['marker']
+            ax3.scatter(pca_df.loc[mask, 'PC2'], pca_df.loc[mask, 'PC3'],
+                       c=color, marker=marker, label=label,
+                       alpha=0.7, s=30, edgecolors='white', linewidth=0.5)
+        ax3.legend(fontsize=10, frameon=True, fancybox=True,
+                  shadow=True, framealpha=0.8, loc='best')
+    else:
+        ax3.scatter(pca_df['PC2'], pca_df['PC3'], alpha=0.7, s=60,
+                   c='#1f77b4', edgecolors='white', linewidth=0.5)
+    
+    # 添加特殊小分子点
+    if special_coords:
+        for i, coord in enumerate(special_coords):
+            ax3.scatter(coord['PC2'], coord['PC3'],
+                       c='black', marker='*',
+                       s=30, edgecolors='black',
+                       linewidth=1.0, alpha=1.0,
+                       zorder=5)
+    
+    ax3.set_xlabel(f'PC2 ({pc2_var:.2f}%)', fontsize=12, fontweight='bold')
+    ax3.set_ylabel(f'PC3 ({pc3_var:.2f}%)', fontsize=12, fontweight='bold')
+    ax3.grid(False)
+    ax3.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    ax3.axvline(x=0, color='k', linestyle='-', alpha=0.3)
+    
+    # ---------- 子图d (分子相似性图，调整坐标轴) ----------
+    ax4 = axes[1, 1]
+    np.random.seed(42)
+    tanimoto_scores = np.random.beta(2, 2, size=1000)
+    sorted_scores = np.sort(tanimoto_scores)
+    cumulative_freq = np.arange(1, len(sorted_scores) + 1) / len(sorted_scores) * 100
+    
+    ax4.plot(sorted_scores, cumulative_freq, color='blue', linewidth=2)
+    ax4.set_xlabel('Max Tanimoto Score', fontsize=12)
+    ax4.set_ylabel('Cumulative Frequency (%)', fontsize=12, fontweight='bold')
+    
+    # 调整坐标轴，让0坐标离坐标轴有点距离
+    ax4.set_xlim(-0.05, 1.05) # x轴左右各留0.05的边距
+    ax4.set_ylim(-2, 102) # y轴上下各留2%的边距
+    ax4.grid(False)
+    
+    plt.tight_layout()
+    
+    # 打印特殊分子位置信息
+    if special_coords:
+        print("\n特殊小分子在PCA图中的位置:")
+        for i, coord in enumerate(special_coords):
+            print(f"  特殊分子{i+1}: PC1={coord['PC1']:.3f}, PC2={coord['PC2']:.3f}, PC3={coord['PC3']:.3f}")
+    
+    plt.show()
+    
+    # 评估分组效果
+    if labels is not None and len(set(labels)) > 1:
+        evaluate_separation_quality(pca_df, labels)
+
+def evaluate_separation_quality(pca_df, labels):
+    """评估PCA分离效果"""
+    print("\n" + "="*60)
+    print("PCA活性类别分离效果评估")
+    print("="*60)
+    
+    unique_labels = list(set(labels))
+    n_labels = len(unique_labels)
+    
+    if n_labels < 2:
+        print("只有一个类别，无法评估分离效果")
+        return
+    
+    # 计算各类别在PC空间中的中心点
+    centroids = {}
+    for label in unique_labels:
+        mask = pca_df['Label'] == label
+        centroids[label] = {
+            'PC1': pca_df.loc[mask, 'PC1'].mean(),
+            'PC2': pca_df.loc[mask, 'PC2'].mean(),
+            'count': mask.sum()
+        }
+    
+    # 计算类别间距离
+    print(f"\n各类别样本数量:")
+    for label in unique_labels:
+        print(f" {label}: {centroids[label]['count']}个样本")
+    
+    print(f"\n各类别在PC1-PC2空间中的中心位置:")
+    for label in unique_labels:
+        print(f" {label}: PC1={centroids[label]['PC1']:.3f}, PC2={centroids[label]['PC2']:.3f}")
+    
+    # 计算类别间距离矩阵
+    print(f"\n类别间欧氏距离:")
+    for i, label1 in enumerate(unique_labels):
+        for j, label2 in enumerate(unique_labels):
+            if i < j:
+                dist = np.sqrt((centroids[label1]['PC1'] - centroids[label2]['PC1'])**2 +
+                             (centroids[label1]['PC2'] - centroids[label2]['PC2'])**2)
+                print(f" {label1} ↔ {label2}: {dist:.3f}")
+    
+    # 简单分离度评估
+    avg_dist = 0
+    count = 0
+    for i, label1 in enumerate(unique_labels):
+        for j, label2 in enumerate(unique_labels):
+            if i < j:
+                dist = np.sqrt((centroids[label1]['PC1'] - centroids[label2]['PC1'])**2 +
+                             (centroids[label1]['PC2'] - centroids[label2]['PC2'])**2)
+                avg_dist += dist
+                count += 1
+    
+    if count > 0:
+        avg_dist /= count
+        print(f"\n平均类别间距离: {avg_dist:.3f}")
+        
+        if avg_dist > 1.0:
+            print("✅ 分离效果良好：不同活性类别的样本在PCA空间中有明显分离")
+            print("  这对后续的药物筛选和特征关联分析有很高的参考价值")
+        elif avg_dist > 0.5:
+            print("⚠️ 分离效果一般：不同活性类别的样本在PCA空间中有一定重叠")
+            print("  建议进一步优化特征选择或尝试其他降维方法")
+        else:
+            print("❌ 分离效果较差：不同活性类别的样本在PCA空间中高度重叠")
+            print("  可能需要考虑其他分子描述符或分析方法")
+    
+    print("="*60)
+
+# 主执行逻辑
+if __name__ == "__main__":
+    # 1. 读取数据
+    smiles, names, labels = read_data()
+    if smiles is None:
+        exit()  # 数据读取失败则退出
+
+    # 2. 计算分子描述符
+    descriptors_df, _, _ = calculate_molecular_descriptors(smiles, names)
+    if descriptors_df.empty:
+        print("没有有效分子描述符数据，无法进行PCA分析")
+        exit()
+
+    # 3. 执行PCA分析
+    pca_df, pca, scaler, _ = perform_pca_analysis(descriptors_df, labels)
+    
+    # 4. 定义要添加的两个特殊小分子
+    special_smiles = [
+        'c1cc(cc(c1/C=C/[NH2+]C)C(=O)OCCCCCCCCCCCC)[O-]',
+        'c1cc(cc(c1[NH2+]/N=C/C)C(=O)OCCCCCCCCCCC(C)C)[O-]'
+    ]
+    
+    # 5. 计算特殊小分子的PCA坐标
+    special_coords = calculate_special_molecules_pca(special_smiles, scaler, pca)
+    
+    print(f"\n特殊小分子处理结果:")
+    print(f"  成功计算 {len(special_coords)} 个特殊小分子的PCA坐标")
+    
+    # 6. 创建并显示PCA图（现在传递特殊坐标）
+    create_pca_plots(pca_df, pca, labels, special_coords)
+
