@@ -1,0 +1,27 @@
+import pandas as pd
+from rdkit import Chem
+
+# 读取数据
+df = pd.read_csv("raw_data.csv")
+
+# 保留关键列
+df = df[["smiles", "ic50"]].dropna()  # 去除空值
+
+# 过滤无效SMILES
+df = df[df["smiles"].apply(lambda x: Chem.MolFromSmiles(x) is not None)]
+
+# 统一IC50单位为nM并计算pIC50（假设原始单位有μM和nM）
+def ic50_to_pic50(ic50, unit):
+    if unit == "μM":
+        ic50_nm = ic50 * 1000
+    else:  # nM
+        ic50_nm = ic50
+    return -round(np.log10(ic50_nm / 1e9), 3)
+
+df["pIC50"] = df.apply(lambda row: ic50_to_pic50(row["ic50"], row["unit"]), axis=1)
+
+# 去除pIC50异常值（Z-score法）
+from scipy import stats
+z_scores = stats.zscore(df["pIC50"])
+df = df[abs(z_scores) <= 3]
+
